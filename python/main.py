@@ -4,11 +4,11 @@ from fastapi import FastAPI, Depends, HTTPException
 from database import engine, SQLModel, get_db_session
 from sqlmodel import Session, select, or_, and_
 import models
-from models import get_attendee_ids, add_attendee, remove_attendee, get_saved_party_ids, add_saved_party, remove_saved_party, Host
+from models import get_attendee_ids, add_attendee, remove_attendee, get_saved_party_ids, add_saved_party, remove_saved_party, Host, PartyRequest
 import IDVerification
 from sqlalchemy import case
 from http import HTTPStatus
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 from pydantic import BaseModel
 from sqlmodel import Field
@@ -16,7 +16,7 @@ import datetime as dt
 
 SQLModel.metadata.create_all(engine)
 
-me = credentials.Certificate("houseparty-26abf-firebase-adminsdk-fbsvc-529fbe0b54.json")
+me = credentials.Certificate("houseparty-26abf-firebase-adminsdk-fbsvc-6c6350c23f.json")
 firebase_admin.initialize_app(me)
 app  = FastAPI()
 
@@ -31,13 +31,13 @@ async def create_custom_token(user_id: str):
 @app.post("/register")
 async def register(userdata : models.newUser, token_data: dict = Depends(IDVerification.verify_firebase_token)):
     with get_db_session() as Sesh:
-        existing_user = await IDVerification.get_user_by_firebase_uid(Sesh, token_data['user_id'])
+        existing_user = await IDVerification.get_user_by_firebase_uid(Sesh, token_data.get('uid') or token_data.get('user_id'))
         if existing_user:
             raise HTTPException(status_code=409, detail="User already exists")
         
         # Create new user in database
         new_user = models.User(
-            firebase_uid=token_data['user_id'],
+            firebase_uid=token_data.get('uid') or token_data.get('user_id'),
             email=userdata.email,
             username=userdata.username,
             phone=userdata.phone,
@@ -52,7 +52,7 @@ async def register(userdata : models.newUser, token_data: dict = Depends(IDVerif
 @app.post("/login")
 async def login(token : dict = Depends(IDVerification.verify_firebase_token)):
     with get_db_session() as sesh:
-        user = await IDVerification.get_user_by_firebase_uid(sesh, token["user_id"])
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token.get("uid") or token.get("user_id"))
         if user:
             return {
                 "message": "Login successful",
@@ -91,7 +91,7 @@ class PartyFilters(BaseModel):
 async def create_party(party_data: CreatePartyRequest, token_data: dict = Depends(IDVerification.verify_firebase_token)):
     with get_db_session() as sesh:
         # Get the current user
-        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data['user_id'])
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -122,34 +122,45 @@ async def create_party(party_data: CreatePartyRequest, token_data: dict = Depend
 
 @app.post("/parties/{party_id}/join")
 async def join_party(party_id: int, token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Create a party request (buy ticket / queue up for party)"""
     with get_db_session() as sesh:
         # Get the current user
-        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data['user_id'])
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        # Check if user is already at a party
-        if user.current_party_id:
-            raise HTTPException(status_code=400, detail="Already at a party. Leave current party first.")
         
         # Get the party
         party = sesh.exec(select(models.Party).where(models.Party.id == party_id)).first()
         if not party:
             raise HTTPException(status_code=404, detail="Party not found")
         
-        # Add user to attendees and set current party
-        if add_attendee(party, user.id):
-            user.current_party_id = party_id
-            sesh.commit()
-            return {"message": "Successfully joined party", "id": party_id}
-        else:
-            raise HTTPException(status_code=400, detail="Failed to join party")
+        # Check if request already exists
+        existing_request = sesh.exec(
+            select(PartyRequest).where(
+                and_(PartyRequest.user_id == user.id, PartyRequest.party_id == party_id)
+            )
+        ).first()
+        
+        if existing_request:
+            raise HTTPException(status_code=400, detail="Already requested to join this party")
+        
+        # Create party request (pending until host accepts)
+        party_request = PartyRequest(
+            user_id=user.id,
+            party_id=party_id,
+            accepted=False
+        )
+        sesh.add(party_request)
+        sesh.commit()
+        sesh.refresh(party_request)
+        
+        return {"message": "Party request created successfully", "id": party_id, "request_id": party_request.id}
 
 @app.post("/parties/{party_id}/leave")
 async def leave_party(party_id: int, token_data: dict = Depends(IDVerification.verify_firebase_token)):
     with get_db_session() as sesh:
         # Get the current user
-        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data['user_id'])
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -377,7 +388,7 @@ async def end_party(party_id: int, token_data: dict = Depends(IDVerification.ver
     """End a party abruptly by setting end_time to now"""
     with get_db_session() as sesh:
         # Get the current user
-        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data['user_id'])
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -391,7 +402,7 @@ async def end_party(party_id: int, token_data: dict = Depends(IDVerification.ver
             raise HTTPException(status_code=403, detail="Only the host can end the party")
         
         # End the party by setting end_time to now
-        party.end_time = datetime.now(datetime.UTC)
+        party.end_time = datetime.now(timezone.utc)
         sesh.commit()
         
         return {"message": "Party ended successfully"}
@@ -401,7 +412,7 @@ async def cancel_party(party_id: int, token_data: dict = Depends(IDVerification.
     """Cancel a party by setting start_time equal to end_time"""
     with get_db_session() as sesh:
         # Get the current user
-        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data['user_id'])
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -426,7 +437,7 @@ async def save_party(party_id: int, token_data: dict = Depends(IDVerification.ve
     """Save a party to user's saved parties"""
     with get_db_session() as sesh:
         # Get the current user
-        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data['user_id'])
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -447,7 +458,7 @@ async def remove_saved_party_endpoint(party_id: int, token_data: dict = Depends(
     """Remove a party from user's saved parties"""
     with get_db_session() as sesh:
         # Get the current user
-        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data['user_id'])
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -463,7 +474,7 @@ async def get_saved_parties(token_data: dict = Depends(IDVerification.verify_fir
     """Get user's saved parties"""
     with get_db_session() as sesh:
         # Get the current user
-        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data['user_id'])
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
@@ -482,25 +493,169 @@ async def get_saved_parties(token_data: dict = Depends(IDVerification.verify_fir
                     "id": party.id,
                     "name": party.name,
                     "description": party.description,
-                    "host": {
-                        "id": host.id,
-                        "username": host.username
-                    } if host else None,
+                    "distance": 0.0,  # Not applicable for saved parties
+                    "hashtags": party.hashtags,
                     "attendee_count": len(get_attendee_ids(party)),
-                    "location": {
-                        "latitude": party.latitude,
-                        "longitude": party.longitude,
-                        "address": party.address
-                    },
-                    "start_time": party.start_time,
-                    "end_time": party.end_time,
-                    "max_attendees": party.max_attendees,
-                    "created_at": party.created_at
+                    "start_time": party.start_time.isoformat() + "Z" if party.start_time else None,
+                    "end_time": party.end_time.isoformat() + "Z" if party.end_time else None,
+                    "max_attendees": party.max_attendees
                 }
                 saved_parties.append(party_data)
         
         return {"saved_parties": saved_parties}
     
+@app.get("/users/active-parties")
+async def get_active_parties(token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Get user's active parties (pending and accepted requests)"""
+    with get_db_session() as sesh:
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get all party requests for this user
+        requests = sesh.exec(
+            select(PartyRequest).where(PartyRequest.user_id == user.id)
+        ).all()
+        
+        pending_parties = []
+        accepted_parties = []
+        
+        for req in requests:
+            party = sesh.exec(select(models.Party).where(models.Party.id == req.party_id)).first()
+            if not party:
+                continue
+            
+            host = sesh.exec(select(models.User).where(models.User.id == party.host_id)).first()
+            party_data = {
+                "id": party.id,
+                "name": party.name,
+                "description": party.description,
+                "hashtags": party.hashtags,
+                "attendee_count": len(get_attendee_ids(party)),
+                "max_attendees": party.max_attendees,
+                "start_time": party.start_time.isoformat() + "Z" if party.start_time else None,
+                "end_time": party.end_time.isoformat() + "Z" if party.end_time else None,
+                "host": {
+                    "id": host.id,
+                    "username": host.username
+                } if host else None,
+                "request_id": req.id,
+                "accepted": req.accepted,
+                "created_at": req.created_at.isoformat() + "Z" if req.created_at else None
+            }
+            
+            if req.accepted:
+                accepted_parties.append(party_data)
+            else:
+                pending_parties.append(party_data)
+        
+        return {
+            "pending_parties": pending_parties,
+            "accepted_parties": accepted_parties
+        }
+
+@app.get("/users/profile")
+async def get_user_profile(token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Get current user's profile"""
+    with get_db_session() as sesh:
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        return {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "phone": user.phone,
+            "bio": user.bio,
+            "pfpURL": user.pfpURL,
+            "isHost": user.isHost
+        }
+
+class UpdateUserRequest(BaseModel):
+    username: str | None = None
+    phone: str | None = None
+    bio: str | None = None
+    pfpURL: str | None = None
+
+@app.put("/users/profile")
+async def update_user_profile(update_data: UpdateUserRequest, token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Update current user's profile"""
+    with get_db_session() as sesh:
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if update_data.username is not None:
+            user.username = update_data.username
+        if update_data.phone is not None:
+            user.phone = update_data.phone
+        if update_data.bio is not None:
+            user.bio = update_data.bio
+        if update_data.pfpURL is not None:
+            user.pfpURL = update_data.pfpURL
+        
+        user.updated_at = datetime.now(timezone.utc)
+        sesh.commit()
+        sesh.refresh(user)
+        
+        return {
+            "message": "Profile updated successfully",
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "username": user.username,
+                "phone": user.phone,
+                "bio": user.bio,
+                "pfpURL": user.pfpURL
+            }
+        }
+
+@app.get("/parties/{party_id}/details")
+async def get_party_details(party_id: int, token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Get detailed party information including saved status and request status"""
+    with get_db_session() as sesh:
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        party = sesh.exec(select(models.Party).where(models.Party.id == party_id)).first()
+        if not party:
+            raise HTTPException(status_code=404, detail="Party not found")
+        
+        host = sesh.exec(select(models.User).where(models.User.id == party.host_id)).first()
+        saved_ids = get_saved_party_ids(user)
+        is_saved = party_id in saved_ids
+        
+        # Check if user has a request for this party
+        party_request = sesh.exec(
+            select(PartyRequest).where(
+                and_(PartyRequest.user_id == user.id, PartyRequest.party_id == party_id)
+            )
+        ).first()
+        
+        return {
+            "id": party.id,
+            "name": party.name,
+            "description": party.description,
+            "hashtags": party.hashtags,
+            "attendee_count": len(get_attendee_ids(party)),
+            "max_attendees": party.max_attendees,
+            "start_time": party.start_time.isoformat() + "Z" if party.start_time else None,
+            "end_time": party.end_time.isoformat() + "Z" if party.end_time else None,
+            "address": party.address,
+            "latitude": party.latitude,
+            "longitude": party.longitude,
+            "media_url": party.media_url,
+            "host": {
+                "id": host.id,
+                "username": host.username
+            } if host else None,
+            "is_saved": is_saved,
+            "has_request": party_request is not None,
+            "request_accepted": party_request.accepted if party_request else False
+        }
+
 @app.post("/users/become-host")
 async def become_host(token_data: dict = Depends(IDVerification.verify_firebase_token)):
     """
@@ -508,7 +663,7 @@ async def become_host(token_data: dict = Depends(IDVerification.verify_firebase_
     TODO: In production, require Stripe onboarding and card verification here!
     """
     with get_db_session() as sesh:
-        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data['user_id'])
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         if user.isHost:

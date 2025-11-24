@@ -120,3 +120,12 @@ class Host(SQLModel, table=True):
     parties_thrown: int = 0
     # ... other host fields ...
     created_at: datetime = Field(default_factory=lambda: datetime.now(dt.UTC))
+
+class PartyRequest(SQLModel, table=True):
+    """Tracks party join requests with pending/accepted status"""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", description="User requesting to join")
+    party_id: int = Field(foreign_key="party.id", description="Party being requested")
+    accepted: bool = Field(default=False, description="Whether the request has been accepted by host")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(dt.UTC))
+    updated_at: datetime | None = Field(default_factory=lambda: datetime.now(dt.UTC))
