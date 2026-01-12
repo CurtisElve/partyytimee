@@ -607,7 +607,8 @@ async def update_user_profile(update_data: UpdateUserRequest, token_data: dict =
                 "username": user.username,
                 "phone": user.phone,
                 "bio": user.bio,
-                "pfpURL": user.pfpURL
+                "pfpURL": user.pfpURL,
+                "isHost" : user.isHost
             }
         }
 
