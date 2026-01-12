@@ -449,7 +449,7 @@ async def save_party(party_id: int, token_data: dict = Depends(IDVerification.ve
         # Add party to saved parties
         if add_saved_party(user, party_id):
             sesh.commit()
-            return {"message": "Party saved successfully"}
+            return {"message": "Party saved successfully", "id": party_id}
         else:
             raise HTTPException(status_code=400, detail="Party already saved")
 
@@ -465,7 +465,7 @@ async def remove_saved_party_endpoint(party_id: int, token_data: dict = Depends(
         # Remove party from saved parties
         if remove_saved_party(user, party_id):
             sesh.commit()
-            return {"message": "Party removed from saved parties"}
+            return {"message": "Party removed from saved parties", "id": party_id}
         else:
             raise HTTPException(status_code=400, detail="Party not in saved parties")
 
@@ -676,4 +676,228 @@ async def become_host(token_data: dict = Depends(IDVerification.verify_firebase_
             sesh.add(new_host)
         sesh.commit()
         return {"message": "User upgraded to host (dev only, add Stripe in prod)", "user_id": user.id}
+
+@app.get("/hosts/parties")
+async def get_host_parties(token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Get all parties hosted by the current user, sorted by active/past/future"""
+    with get_db_session() as sesh:
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if not user.isHost:
+            raise HTTPException(status_code=403, detail="User is not a host")
+        
+        host = sesh.exec(select(Host).where(Host.user_id == user.id)).first()
+        if not host:
+            raise HTTPException(status_code=404, detail="Host record not found")
+        
+        # Get all parties hosted by this host
+        all_parties = sesh.exec(select(models.Party).where(models.Party.host_id == host.id)).all()
+        
+        now = datetime.now(timezone.utc)
+        active_parties = []
+        past_parties = []
+        future_parties = []
+        
+        for party in all_parties:
+            party_data = {
+                "id": party.id,
+                "name": party.name,
+                "description": party.description,
+                "hashtags": party.hashtags,
+                "attendee_count": len(get_attendee_ids(party)),
+                "max_attendees": party.max_attendees,
+                "start_time": party.start_time.isoformat() + "Z" if party.start_time else None,
+                "end_time": party.end_time.isoformat() + "Z" if party.end_time else None,
+                "address": party.address,
+                "latitude": party.latitude,
+                "longitude": party.longitude
+            }
+            
+            if party.start_time and party.end_time:
+                # Ensure both datetimes are timezone-aware for comparison with now
+                start_time = party.start_time
+                end_time = party.end_time
+                
+                # Convert to UTC if timezone-naive
+                if start_time.tzinfo is None:
+                    start_time = start_time.replace(tzinfo=timezone.utc)
+                elif start_time.tzinfo != timezone.utc:
+                    start_time = start_time.astimezone(timezone.utc)
+                    
+                if end_time.tzinfo is None:
+                    end_time = end_time.replace(tzinfo=timezone.utc)
+                elif end_time.tzinfo != timezone.utc:
+                    end_time = end_time.astimezone(timezone.utc)
+                
+                if start_time <= now <= end_time:
+                    active_parties.append(party_data)
+                elif end_time < now:
+                    past_parties.append(party_data)
+                elif start_time > now:
+                    future_parties.append(party_data)
+            else:
+                future_parties.append(party_data)
+        
+        return {
+            "active_parties": active_parties,
+            "past_parties": past_parties,
+            "future_parties": future_parties
+        }
+
+@app.get("/hosts/parties/{party_id}/attendees")
+async def get_party_attendees(party_id: int, token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Get the guestlist (actual attendees) for a party"""
+    with get_db_session() as sesh:
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if not user.isHost:
+            raise HTTPException(status_code=403, detail="User is not a host")
+        
+        party = sesh.exec(select(models.Party).where(models.Party.id == party_id)).first()
+        if not party:
+            raise HTTPException(status_code=404, detail="Party not found")
+        
+        host = sesh.exec(select(Host).where(Host.user_id == user.id)).first()
+        if party.host_id != host.id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        # Get attendee IDs from party
+        attendee_ids = get_attendee_ids(party)
+        attendees = []
+        
+        for user_id in attendee_ids:
+            attendee_user = sesh.exec(select(models.User).where(models.User.id == user_id)).first()
+            if attendee_user:
+                attendees.append({
+                    "user_id": attendee_user.id,
+                    "username": attendee_user.username,
+                    "email": attendee_user.email,
+                    "bio": attendee_user.bio,
+                    "pfpURL": attendee_user.pfpURL
+                })
+        
+        return {"attendees": attendees}
+
+@app.get("/hosts/parties/{party_id}/requests")
+async def get_party_requests(party_id: int, token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Get all party requests (the 'line') for a party"""
+    with get_db_session() as sesh:
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if not user.isHost:
+            raise HTTPException(status_code=403, detail="User is not a host")
+        
+        party = sesh.exec(select(models.Party).where(models.Party.id == party_id)).first()
+        if not party:
+            raise HTTPException(status_code=404, detail="Party not found")
+        
+        host = sesh.exec(select(Host).where(Host.user_id == user.id)).first()
+        if party.host_id != host.id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this party's requests")
+        
+        # Get all requests for this party
+        requests = sesh.exec(select(PartyRequest).where(PartyRequest.party_id == party_id)).all()
+        
+        request_list = []
+        for req in requests:
+            requester = sesh.exec(select(models.User).where(models.User.id == req.user_id)).first()
+            if requester:
+                request_list.append({
+                    "request_id": req.id,
+                    "user_id": req.user_id,
+                    "username": requester.username,
+                    "email": requester.email,
+                    "bio": requester.bio,
+                    "pfpURL": requester.pfpURL,
+                    "accepted": req.accepted,
+                    "created_at": req.created_at.isoformat() + "Z" if req.created_at else None
+                })
+        
+        return {"requests": request_list}
+
+@app.post("/hosts/parties/{party_id}/requests/{request_id}/accept")
+async def accept_party_request(party_id: int, request_id: int, token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Accept a party request (move from pending to accepted)"""
+    with get_db_session() as sesh:
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if not user.isHost:
+            raise HTTPException(status_code=403, detail="User is not a host")
+        
+        party = sesh.exec(select(models.Party).where(models.Party.id == party_id)).first()
+        if not party:
+            raise HTTPException(status_code=404, detail="Party not found")
+        
+        host = sesh.exec(select(Host).where(Host.user_id == user.id)).first()
+        if party.host_id != host.id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        request = sesh.exec(select(PartyRequest).where(PartyRequest.id == request_id)).first()
+        if not request:
+            raise HTTPException(status_code=404, detail="Request not found")
+        
+        if request.party_id != party_id:
+            raise HTTPException(status_code=400, detail="Request does not belong to this party")
+        
+        request.accepted = True
+        request.updated_at = datetime.now(timezone.utc)
+        
+        # Add user to attendees
+        add_attendee(party, request.user_id)
+        
+        sesh.commit()
+        return {"message": "Request accepted successfully"}
+
+@app.post("/hosts/parties/{party_id}/requests/{request_id}/reject")
+async def reject_party_request(party_id: int, request_id: int, token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Reject a party request (delete the request)"""
+    with get_db_session() as sesh:
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if not user.isHost:
+            raise HTTPException(status_code=403, detail="User is not a host")
+        
+        party = sesh.exec(select(models.Party).where(models.Party.id == party_id)).first()
+        if not party:
+            raise HTTPException(status_code=404, detail="Party not found")
+        
+        host = sesh.exec(select(Host).where(Host.user_id == user.id)).first()
+        if party.host_id != host.id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        request = sesh.exec(select(PartyRequest).where(PartyRequest.id == request_id)).first()
+        if not request:
+            raise HTTPException(status_code=404, detail="Request not found")
+        
+        if request.party_id != party_id:
+            raise HTTPException(status_code=400, detail="Request does not belong to this party")
+        
+        sesh.delete(request)
+        sesh.commit()
+        return {"message": "Request rejected successfully"}
+
+@app.get("/hosts/party-count")
+async def get_host_party_count(token_data: dict = Depends(IDVerification.verify_firebase_token)):
+    """Get the number of parties hosted by the current user"""
+    with get_db_session() as sesh:
+        user = await IDVerification.get_user_by_firebase_uid(sesh, token_data.get('uid') or token_data.get('user_id'))
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        host = sesh.exec(select(Host).where(Host.user_id == user.id)).first()
+        if not host:
+            return {"party_count": 0}
+        
+        party_count = sesh.exec(select(models.Party).where(models.Party.host_id == host.id)).all()
+        return {"party_count": len(party_count)}
     
