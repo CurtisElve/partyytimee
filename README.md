@@ -2,7 +2,7 @@
 
 This repository houses the engine for a comprehensive social event platform. Since the beginning, I designed this as a production-ready system designed to handle complex interactions between users and event organizers.
 
-### 🌎 The Scope of the System
+### The Scope of the System
 
 The main feat of this project is its breadth. The API manages an extensive set of endpoints—including:
 - identity and secure access middleware via Firebase
@@ -39,7 +39,7 @@ Rather than just "saving data," the backend operates as a state machine that enf
 - **Data Integrity:** The system uses a relational schema managed by **Alembic** migrations to handle the intricate foreign-key relationships between users, the parties they throw, and the requests they send.
     
  
-### 🌟 Notable Features
+### Notable Features
 
 - **Intelligent Search & Scoring:** I implemented a custom search engine that doesn't just look for words—it scores them. Matches in a party’s name are weighted more heavily than matches in the description, ensuring the most relevant results float to the top.
     
