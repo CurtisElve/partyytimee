@@ -1,4 +1,4 @@
-# Python
+# --- Python ---
 __pycache__/
 *.py[cod]
 *$py.class
@@ -19,55 +19,46 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
 
-# Virtual environments
+# --- Virtual Environments ---
 venv/
 env/
 ENV/
-env.bak/
-venv.bak/
+.venv/
 python/Scripts/
 python/Lib/
 python/Include/
 python/pyvenv.cfg
 
-# Database
+# --- Database (SQLite) ---
 *.db
 *.sqlite
 *.sqlite3
 
-# Firebase
+# --- Sensitive Credentials & Environment ---
+.env
+.env.*
+houseparty-*-firebase-adminsdk-*.json
+secrets.json
+*.p12
+*.pem
+
+# --- Firebase & Tooling Artifacts ---
 .firebase/
 firebase-debug.log*
-firebase-debug.*.log*
-firebase-tools-instant-win.exe
+.runtimeconfig.json
+token.json
+body.json
+response.json
 
-# Environment variables
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# IDE
+# --- IDE & OS ---
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
-
-# OS
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
 
-# Logs
+# --- Logs ---
 *.log
 logs/
-# Firebase service account keys
-*.json
